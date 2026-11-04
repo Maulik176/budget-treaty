@@ -1,0 +1,9 @@
+{
+  "currency": "INR",
+  "options": [
+    {"id": "A1", "name": "Example option A1", "cost": 6000, "start": "2026-12-12", "end": "2026-12-14", "tags": ["train"], "summary": "Example data."},
+    {"id": "B2", "name": "Example option B2", "cost": 8000, "start": "2026-12-12", "end": "2026-12-15", "tags": ["train"], "summary": "Example data."},
+    {"id": "C3", "name": "Example option C3", "cost": 9500, "start": "2026-12-19", "end": "2026-12-21", "tags": ["flight"], "summary": "Example data."},
+    {"id": "D4", "name": "Example option D4", "cost": 7000, "start": "2026-12-12", "end": "2026-12-13", "tags": ["bus"], "summary": "Example data."}
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "trip_room": "<Discord server>: trip",
+  "organizer": "<organizer's Discord username>",
+  "friends": [
+    {"name": "Alice", "discord": "<alice's Discord username>", "room": "<Discord server>: treaty-alice"},
+    {"name": "Bob", "discord": "<bob's Discord username>", "room": "<Discord server>: treaty-bob"},
+    {"name": "Chen", "discord": "<chen's Discord username>", "room": "<Discord server>: treaty-chen"}
+  ],
+  "catalog": "catalog.json",
+  "min_group": 3,
+  "trip_started_at": null
+}
