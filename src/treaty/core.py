@@ -132,7 +132,9 @@ class Treaty:
         if self.announced_ready or self._not_ready():
             return []
         self.announced_ready = True
-        return [self._say(f"✅ All {len(self.members)} friends have set their limits privately. "
+        everyone = "You've" if len(self.members) == 1 else f"All {len(self.members)} friends have"
+        return [self._say(f"✅ {everyone} set your limits privately. " if len(self.members) == 1 else
+                          f"✅ {everyone} set their limits privately. "
                           "I can check trip packages now; nobody's numbers will be shown.")]
 
     def preferences_text(self) -> str:

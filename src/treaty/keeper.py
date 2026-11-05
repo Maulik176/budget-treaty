@@ -21,17 +21,12 @@ from treaty.core import PRIVATE, TRIP, Treaty
 from treaty.switch_client import AGENT_FILE, Switch, SwitchError, hold_room, listen, register
 
 KEEPER_DESCRIPTION = "Budget Treaty keeper: holds each friend's private limits and checks trip options. Plain code, no AI."
-CATALOG_DOC, LEDGER_DOC, PREFERENCES_DOC = "trip-catalog", "treaty-ledger", "group-preferences"
-DOCS = {
-    CATALOG_DOC: ("The trip packages and their prices",
-                  "The only source of trip packages and prices. Quote packages by id. Never invent a price."),
-    LEDGER_DOC: ("Who checked which package, the verdicts, the votes and the lock",
-                 "The trip's public history. Use it to summarize what the group has checked and decided. It never "
-                 "contains anyone's limits."),
-    PREFERENCES_DOC: ("What the group prefers, as counts with no names",
-                      "Food, hotel and flight preferences across the group, and how many friends are ready. Use it to "
-                      "shape packages. It never contains names, budgets or dates."),
-}
+BOARD_DOC = "treaty-board"
+BOARD = ("The trip's packages, what the group prefers (no names) and every check and vote",
+         "The keeper's public board. Packages: the only valid prices, quoted by id. Preferences: counts with no names. "
+         "History: every check, vote and lock. It never contains anyone's budget or dates.")
+OLD_DOCS = ("trip-catalog", "treaty-ledger", "group-preferences")  # replaced by the board; removed if found
+SYNC_DELAY_S = 20  # Switch announces every document update in the channel, so update once per burst
 
 
 # ── Pure helpers (tested offline) ──────────────────────────────────────────────────────────────────────────────
@@ -95,8 +90,9 @@ class Keeper:
         self.own_posts: set[str] = set()
         self.queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self.room_ready = asyncio.Event()
-        self.doc_ids: dict[str, str] = {}
-        self.doc_content: dict[str, str] = {}
+        self.board_id: str | None = None
+        self.board_content = ""
+        self.sync_task: asyncio.Task | None = None
 
     def rebuild(self) -> int:
         """Switch's room history is the only record: replay it through the same rules, posting nothing."""
@@ -117,33 +113,48 @@ class Keeper:
                 return False, f"{', '.join(found)} in {self.treaty.members[friend]}'s private channel"
         return True, ""
 
-    def _documents(self) -> dict[str, str]:
+    def _board(self) -> str:
         t = self.treaty
-        return {CATALOG_DOC: catalog_text(t.options, t.currency),
-                LEDGER_DOC: "\n".join(t.ledger) or "Nothing checked yet.",
-                PREFERENCES_DOC: t.preferences_text()}
+        return "\n\n".join([
+            "## Packages\n" + catalog_text(t.options, t.currency),
+            "## What the group prefers (counts, no names)\n" + t.preferences_text(),
+            "## History\n" + ("\n".join(t.ledger) or "Nothing checked yet."),
+        ])
 
     def ensure_documents(self) -> None:
-        """The keeper's three room documents in the trip room. Only their creator can change them."""
+        """The keeper's one public board in the trip room. Only its creator (the keeper) can change it."""
         ops = self.switch.agent["ops_connection_id"]
         room = self.switch.op("connect_to_room", ops, room_id=self.trip_room, include_general_instructions=False)
-        self.doc_ids = {d["name"]: d["id"] for d in room.get("documents", [])
-                        if d.get("created_by_agent_id") == self.switch.agent["id"] and d["name"] in DOCS}
-        for name, content in self._documents().items():
-            if name not in self.doc_ids:
-                description, instructions = DOCS[name]
-                self.doc_ids[name] = self.switch.op("create_room_document", ops, name=name, content=content,
-                                                    description=description, instructions=instructions)["document_id"]
-            else:
-                self.switch.op("update_room_document", ops, document_id=self.doc_ids[name], content=content)
-            self.doc_content[name] = content
+        mine = {d["name"]: d["id"] for d in room.get("documents", [])
+                if d.get("created_by_agent_id") == self.switch.agent["id"]}
+        for name in OLD_DOCS:
+            if name in mine:
+                self.switch.op("delete_room_document", ops, document_id=mine[name])
+        content = self._board()
+        if BOARD_DOC in mine:
+            self.board_id = mine[BOARD_DOC]
+            self.switch.op("update_room_document", ops, document_id=self.board_id, content=content)
+        else:
+            self.board_id = self.switch.op("create_room_document", ops, name=BOARD_DOC, content=content,
+                                           description=BOARD[0], instructions=BOARD[1])["document_id"]
+        self.board_content = content
 
-    def sync_documents(self) -> None:
-        for name, content in self._documents().items():
-            if name in self.doc_ids and content != self.doc_content.get(name):
-                self.switch.op("update_room_document", self.switch.agent["ops_connection_id"],
-                               document_id=self.doc_ids[name], content=content)
-                self.doc_content[name] = content
+    def sync_board(self) -> None:
+        content = self._board()
+        if self.board_id and content != self.board_content:
+            self.switch.op("update_room_document", self.switch.agent["ops_connection_id"],
+                           document_id=self.board_id, content=content)
+            self.board_content = content
+
+    async def _sync_later(self) -> None:
+        await asyncio.sleep(SYNC_DELAY_S)
+        await asyncio.wait_for(self.room_ready.wait(), timeout=15)
+        await asyncio.to_thread(self.sync_board)
+
+    def _schedule_sync(self) -> None:
+        if self.sync_task and not self.sync_task.done():
+            self.sync_task.cancel()  # still busy: wait for a quiet moment
+        self.sync_task = asyncio.create_task(self._sync_later())
 
     async def on_frame(self, frame: dict[str, Any]) -> None:
         await self.queue.put(frame)
@@ -174,8 +185,7 @@ class Keeper:
             posted = await asyncio.to_thread(self.switch.post, target, text)
             if posted:
                 self.own_posts.add(posted)
-        await asyncio.wait_for(self.room_ready.wait(), timeout=15)
-        await asyncio.to_thread(self.sync_documents)
+        self._schedule_sync()
 
     async def run(self) -> None:
         listener = asyncio.create_task(listen(self.switch, self.on_frame))  # open first, so nothing slips past the rebuild

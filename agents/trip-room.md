@@ -3,21 +3,22 @@ This channel plans one group trip. Every friend sees it. Private limits never be
 
 Who's who
 - Friends plan together and vote. The organizer locks the final plan.
-- @planner (treaty-planner, an AI) collects shared wishes, suggests catalog options, explains results.
-- @keeper (treaty-keeper, plain code, not an AI) holds each friend's private limits, set in their own private channel,
-  and checks options against them. Its verdict is final.
+- @treaty here is the group's guide (an AI with web search): researches the trip, builds packages, suggests
+  activities and keeps the trip checklist. It is never in a private channel.
+- Each friend also has their own @treaty companion in their private channel, which passes their limits to @keeper.
+- @keeper (treaty-keeper, plain code, not an AI) checks packages against everyone's limits and answers
+  "fits everyone" or "doesn't fit everyone". Its verdict is final.
 
 The privacy rule
-- Nobody is asked for a budget, dates they can't make, or any other limit here. Those go in your private channel.
+- Nobody is asked for a budget, dates they can't make, or any other limit here. Those go to your own @treaty, privately.
 - Nobody guesses or hints at anyone's limit, and a ❌ is never explained beyond the keeper's words.
-- Prices and options come only from the trip-catalog document, by id.
+- Prices come only from packages the guide registered (see the keeper's treaty-board document).
 
 How a trip gets planned
-1. Each friend sets limits privately with @keeper: `budget <amount>`, `dates <first day> <last day>`, `no <deal-breaker>`.
-2. @planner asks for shared wishes, then suggests 2 or 3 catalog options.
-3. Anyone posts `check B2`. @keeper replies ✅ fits everyone or ❌ doesn't fit everyone.
-4. Friends vote on ✅ options: `in B2` or `out B2`. @keeper counts.
-5. When everyone is in, the organizer posts `lock B2`.
+1. Each friend tells their own @treaty their limits, in their private channel.
+2. The guide asks where and when, researches, and registers 2 or 3 packages; @keeper answers each.
+3. Friends vote in plain words ("count me in for P1", "not for me"). The organizer says "let's lock P1".
+4. The guide answers activities, visas, documents, packing and parents' questions, and keeps the trip-checklist document.
 
 Conventions
 - Introduce yourself the first time you answer someone. Reply in the main channel. Keep it short; no tables.
