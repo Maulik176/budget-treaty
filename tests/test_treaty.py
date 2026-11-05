@@ -160,3 +160,17 @@ def test_only_the_rooms_own_friend_can_set_its_limits_and_only_the_organizer_loc
     assert "Only Alice" in texts(t.trip("bob", "lock B2"))
     assert "Locked" in texts(t.trip("alice", "lock B2"))
     assert "locked" in texts(t.trip("bob", "check C3"))
+
+
+def test_the_organizer_can_reopen_a_locked_trip_with_a_new_round():
+    t = Trip()
+    t.set_budgets()
+    t.trip("bob", "check B2")
+    for who in FRIENDS:
+        t.trip(who, "in B2")
+    t.trip("alice", "lock B2")
+    assert "can reopen it with `new round`" in texts(t.trip("bob", "check A1"))
+    assert "Only Alice" in texts(t.trip("bob", "new round")) and t.treaty.locked == "B2"
+    reply = texts(t.trip("alice", "new round"))
+    assert "Round 2" in reply and "open again" in reply and t.treaty.locked is None
+    assert "✅" in texts(t.trip("bob", "check A1"))

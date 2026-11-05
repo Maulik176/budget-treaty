@@ -136,10 +136,11 @@ class Treaty:
             return [self._say(self._tally())]
         if verb not in ("check", "in", "out", "lock", "new"):
             return []  # friends and the planner talking
-        if self.locked:
-            return [self._say(f"The trip is locked: {self._label(self.locked)}.")]
-        if verb == "new" and args == ["round"]:
+        if verb == "new" and args == ["round"]:  # the organizer can also reopen a locked trip this way
             return self._new_round(sender)
+        if self.locked:
+            return [self._say(f"The trip is locked: {self._label(self.locked)}. "
+                              f"{self._name(self.organizer)} can reopen it with `new round`.")]
         if not args:
             return [self._say(f"Use: {verb} <option id>, e.g. {verb} {next(iter(self.options))}.")]
         option = args[0].upper()
@@ -204,11 +205,13 @@ class Treaty:
         return self._start_round()
 
     def _start_round(self) -> list[Outgoing]:
+        reopened = self.locked
         self.applied = dict(self.staged)
-        self.verdicts, self.votes = {}, {}
+        self.verdicts, self.votes, self.locked = {}, {}, None
         self.round += 1
-        self.ledger.append(f"Round {self.round} started")
-        return [self._say(f"Round {self.round}: everyone's latest limits now apply. Check options again.")]
+        self.ledger.append(f"Round {self.round} started" + (f" (reopened after {reopened} was locked)" if reopened else ""))
+        note = f" The trip was locked on {reopened}; it's open again." if reopened else ""
+        return [self._say(f"Round {self.round}: everyone's latest limits now apply. Check options again.{note}")]
 
     # ── Rules ──────────────────────────────────────────────────────────────────────────────────────────────────
 
