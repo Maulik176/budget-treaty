@@ -30,3 +30,11 @@ def test_only_the_keeper_and_the_friend_may_be_in_a_private_room():
     assert intruders(planted, KEEPER_ID, "alice") == ["agent treaty-planner"]
     nosy = room + [{"type": "user", "agent_id": None, "name": "bob"}]
     assert intruders(nosy, KEEPER_ID, "alice") == ["person bob"]
+
+
+def test_a_friends_own_companion_may_be_in_their_room_but_nobody_elses():
+    room = [{"type": "agent", "agent_id": KEEPER_ID, "name": "treaty-keeper"},
+            {"type": "agent", "agent_id": "c1", "name": "treaty-alice"},
+            {"type": "user", "agent_id": None, "name": "alice"}]
+    assert intruders(room, KEEPER_ID, "alice", companion="treaty-alice") == []
+    assert intruders(room, KEEPER_ID, "bob", companion="treaty-bob") == ["agent treaty-alice", "person alice"]

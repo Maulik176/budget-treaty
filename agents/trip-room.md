@@ -13,7 +13,7 @@ The privacy rule
 - Prices and options come only from the trip-catalog document, by id.
 
 How a trip gets planned
-1. Each friend sets limits privately with @keeper: `budget 9000`, `dates 2026-12-12 2026-12-15`, `no flight`.
+1. Each friend sets limits privately with @keeper: `budget <amount>`, `dates <first day> <last day>`, `no <deal-breaker>`.
 2. @planner asks for shared wishes, then suggests 2 or 3 catalog options.
 3. Anyone posts `check B2`. @keeper replies ✅ fits everyone or ❌ doesn't fit everyone.
 4. Friends vote on ✅ options: `in B2` or `out B2`. @keeper counts.

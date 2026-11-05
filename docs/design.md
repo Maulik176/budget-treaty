@@ -1,25 +1,41 @@
 # Budget Treaty: design
 
-A group of friends plans a trip in Discord. Each friend sets private limits (budget, dates, deal-breakers) in their
-own private channel. A plain-code keeper checks catalog options against everyone's limits and answers in the shared
-channel with one word: fits everyone, or doesn't. An AI planner helps the group choose, but it is never in a private
-channel, so it never sees a limit.
+A group of friends plans a trip in Discord. Each friend talks naturally to their own companion agent in their own
+private channel ("I can do around 60-75k, I'm not veg"). The companion turns that into a brief the friend confirms,
+and only the keeper (plain code) reads it. In the shared channel a guide agent researches the trip and registers
+packages; the keeper checks each against everyone's limits and answers with one word: fits everyone, or doesn't.
 
 ## The claim
 
-**No AI agent and no other friend ever sees your number.** The keeper never writes it to a file or database of its
-own. What we don't claim: the host machine (Switch's database) and Discord still store the messages, so the person
-who runs the server is trusted. Nothing here is zero-knowledge or cryptographic, and the README says so.
+**Only your own companion and the keeper ever see your number. No other friend, and no shared AI, does.** The keeper
+never writes it to a file or database of its own. What we don't claim: the host machine (Switch's database) and
+Discord still store the messages, so the person who runs the server is trusted. Nothing here is zero-knowledge or
+cryptographic, and the README says so.
 
 ## Rooms (Switch room membership is the wall)
 
 | Room | Discord channel | Members | AI inside? |
 |---|---|---|---|
-| Trip | `#trip` | friends, `treaty-planner` (Claude Code), `treaty-keeper` (code) | planner only |
-| One per friend | `#treaty-<name>`, private | that friend, `treaty-keeper`, Switch's system accounts | none |
+| Trip | `#trip` | friends, `treaty-planner` as the guide (Claude Code, web search), `treaty-keeper` (code) | the guide only |
+| One per friend | `#treaty-<name>`, private | that friend, their own companion `treaty-<name>` (Claude Code, no web), `treaty-keeper` | that friend's companion only |
+
+`@treaty` is a per-room alias: in a private room it points at that friend's companion, in `#trip` at the guide.
 
 The keeper is one process with one `scope=all` WebSocket: it hears every room it belongs to, and each event carries
-its room id. The planner is a member of `#trip` only, so Switch never delivers it a private-room event.
+its room id. The guide is a member of `#trip` only, so Switch never delivers it a private-room event. A companion is a
+member of its own friend's room only.
+
+## Messages between agents
+
+- **Companion → keeper (private room):** after the friend says yes, the companion posts one line:
+  `BRIEF | budget: 75000 | dates: 2026-12-10 to 2026-12-20 | avoid: none | food: non-veg | hotel: mid-range | flights: cheapest`.
+  The keeper accepts it only from that room's companion. A budget range counts as its top. Food, hotel and flights
+  are preferences, shared only as counts without names in the `group-preferences` document.
+- **Guide → keeper (trip room):** `OPTION P1 | name | cost per person | 2026-12-12 to 2026-12-18 | tags: flight, mid-range`.
+  Only the guide can add packages; each is checked at once; a checked id can't be re-priced in the same round.
+- **Friends → keeper (trip room):** plain words. "count me in for P1", "not for me", and the organizer's "let's lock
+  P1". A message counts as a vote only if it names exactly one known package.
+- When everyone has set their limits, the keeper posts once: "All N friends have set their limits privately."
 
 ## State: Switch's room history is the only record
 
@@ -39,21 +55,21 @@ Trip channel: `options` · `check B2` · `in B2` / `out B2` · `votes` · `statu
 
 ## Probing defences
 
-1. **Catalog options only.** `check 9200` is refused; only option ids are checked.
+1. **Registered packages only.** `check 9200` is refused; only package ids are checked, and only the guide registers packages.
 2. **One verdict for the group.** Never who failed or by how much.
 3. **Readiness.** No verdict until every member has set a budget, and never with fewer than 3 members (with 2, every
    "doesn't fit" gives away the other person's number).
 4. **Rounds.** Once a verdict has been given in a round, limit changes are staged and apply at `new round`, so "fits at
    14:00, fails at 14:02" can't reveal a change. `lock` always re-checks against everyone's latest limits; if the
    option no longer fits, the lock is refused and a new round starts.
-5. **Rate limit.** 5 new checks per person per 10 minutes. Repeating a check already answered this round is free. The
+5. **Rate limit.** 5 new checks per person per 10 minutes (15 for the guide, which checks on everyone's behalf). Repeating a check already answered this round is free. The
    limit message goes only to the person who hit it, in a thread.
 6. **Public query ledger.** `treaty-ledger` records who checked what and the verdict, so probing is visible to friends.
 
 ## The wall tripwire
 
 Before every verdict the keeper fetches each private room's participants from Switch. Anything other than that friend,
-the keeper and Switch's system accounts (`@switch-admin`, the Discord bridge) suspends all checks and names the
+their own companion and the keeper suspends all checks and names the
 intruder in `#trip`. Verdicts resume when it's removed.
 
 ## Tests (must pass before going live)

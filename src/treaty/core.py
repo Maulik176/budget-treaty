@@ -35,6 +35,11 @@ class Treaty:
     members: dict[str, str]  # member key (messaging-app username) -> display name; each has a private room
     organizer: str
     min_group: int = MIN_GROUP  # lower only for a solo rehearsal; the leak argument needs 3 or more
+    companions: dict[str, str] = field(default_factory=dict)  # member -> their own companion agent's name
+    guide: str = ""  # the shared guide agent's name: the only sender whose OPTION messages add packages
+    guide_checks_per_window: int = 15  # the guide checks on everyone's behalf, so it gets more
+    preferences: dict[str, dict[str, str]] = field(default_factory=dict)  # member -> food/hotel/flights (not money)
+    announced_ready: bool = False
     applied: dict[str, Limits] = field(default_factory=dict)  # what verdicts use this round
     staged: dict[str, Limits] = field(default_factory=dict)  # everyone's latest limits
     round: int = 1
@@ -46,8 +51,9 @@ class Treaty:
     seen: set[str] = field(default_factory=set)
 
     def __post_init__(self) -> None:
-        self.options = {o["id"].upper(): o for o in self.catalog["options"]}
+        self.options = {o["id"].upper(): o for o in self.catalog.get("options", [])}
         self.currency = self.catalog.get("currency", "")
+        self.catalog_version = 0  # bumped when the guide adds a package, so the adapter can refresh trip-catalog
 
     # ── Entry point ────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -74,8 +80,12 @@ class Treaty:
 
     def _private(self, event: dict[str, Any]) -> list[Outgoing]:
         owner, sender = event["owner"], event["sender"]
-        if sender != owner or owner not in self.members:
-            return []  # only the channel's own friend can set its limits
+        if owner not in self.members:
+            return []
+        if sender == self.companions.get(owner) and owner in self.companions:
+            return self._brief(owner, event["body"])  # the friend's own companion, writing what the friend agreed
+        if sender != owner:
+            return []  # only the channel's own friend (or their companion) can set its limits
         words = _words(event["body"])
         if not words:
             return []
@@ -90,7 +100,7 @@ class Treaty:
             if amount is None:
                 return [self._say_private(owner, "Use: budget 9000 (a whole amount per person, for the whole trip).")]
             return [self._say_private(owner, self._store(owner, replace(current, budget=amount),
-                                                         f"Saved: budget {self._money(amount)}."))]
+                                                         f"Saved: budget {self._money(amount)}."))] + self._maybe_announce_ready()
         if verb == "dates":
             window = _parse_window(" ".join(args))
             if window is None:
@@ -104,12 +114,46 @@ class Treaty:
                                                          f"Saved: {'no' if verb == 'no' else 'fine with'} {tag}."))]
         return []
 
+    def _brief(self, owner: str, body: str) -> list[Outgoing]:
+        """`BRIEF | budget: 12000 | dates: 2026-12-12 to 2026-12-18 | avoid: flight | food: non-veg | hotel: …`"""
+        brief = _parse_brief(body)
+        if brief is None:
+            return []  # the companion chatting with its friend
+        current = self.staged.get(owner, Limits())
+        limits = replace(current,
+                         budget=brief.get("budget", current.budget),
+                         window=brief.get("window", current.window),
+                         excluded=brief.get("avoid", current.excluded))
+        self.preferences[owner] = {**self.preferences.get(owner, {}), **brief.get("prefs", {})}
+        out = [self._say_private(owner, self._store(owner, limits, "Saved your brief."))]
+        return out + self._maybe_announce_ready()
+
+    def _maybe_announce_ready(self) -> list[Outgoing]:
+        if self.announced_ready or self._not_ready():
+            return []
+        self.announced_ready = True
+        return [self._say(f"✅ All {len(self.members)} friends have set their limits privately. "
+                          "I can check trip packages now; nobody's numbers will be shown.")]
+
+    def preferences_text(self) -> str:
+        """What the group wants, as counts with no names (money and dates are never included)."""
+        lines = []
+        for key in ("food", "hotel", "flights"):
+            values = [p[key] for p in self.preferences.values() if p.get(key)]
+            if values:
+                counts = {v: values.count(v) for v in dict.fromkeys(values)}
+                lines.append(f"{key}: " + ", ".join(f"{v} ×{n}" for v, n in counts.items()))
+        ready = sum(1 for m in self.members if self.applied.get(m, Limits()).budget)
+        lines.append(f"{ready} of {len(self.members)} friends have set their limits privately.")
+        return "\n".join(lines)
+
     def _store(self, owner: str, limits: Limits, said: str) -> str:
         self.staged[owner] = limits
+        who = "you, your companion and the keeper (plain code)" if owner in self.companions else "the keeper (plain code)"
         if not self.verdicts:  # no verdict yet this round: nothing to compare against, so apply now
             self.applied[owner] = limits
-            return f"🔒 {said} Only the keeper (plain code) sees this."
-        return f"🔒 {said} It takes effect next round (checks already ran this round). Only the keeper sees this."
+            return f"🔒 {said} Only {who} can see this."
+        return f"🔒 {said} It takes effect next round (checks already ran this round). Only {who} can see this."
 
     def _describe(self, owner: str) -> str:
         latest = self.staged.get(owner, Limits())
@@ -128,6 +172,11 @@ class Treaty:
         if not words:
             return []
         verb, args, sender = words[0], words[1:], event["sender"]
+        if self.guide and sender == self.guide and verb == "option":
+            return self._add_option(event)
+        natural = self._natural(sender, event["body"]) if verb not in ("check", "in", "out", "lock", "new") else None
+        if natural:
+            verb, args = natural
         if verb == "options":
             return [self._say(self._list_options())]
         if verb == "status":
@@ -152,6 +201,38 @@ class Treaty:
             return self._vote(sender, option, verb)
         return self._lock(sender, option)
 
+    def _natural(self, sender: str, body: str) -> tuple[str, list[str]] | None:
+        """Votes and the lock in plain words ("count me in for P1", "let's lock P1"). Exactly one known option id."""
+        if sender not in self.members:
+            return None
+        ids = {m.upper() for m in re.findall(r"\b([A-Za-z]\d{1,2})\b", body)} & set(self.options)
+        if len(ids) != 1:
+            return None
+        option, text = ids.pop(), body.lower()
+        if sender == self.organizer and re.search(r"\block\b", text):
+            return "lock", [option]
+        if re.search(r"\b(i'?m out|count me out|not for me|pass on|no to|can'?t do|nope)\b|👎", text):
+            return "out", [option]
+        if re.search(r"\b(i'?m in|count me in|in for|works for me|i vote|vote for|let'?s do|i'?m down|sounds good|"
+                     r"yes)\b|\+1|👍", text):
+            return "in", [option]
+        return None
+
+    def _add_option(self, event: dict[str, Any]) -> list[Outgoing]:
+        """The guide registers a package: `OPTION P1 | name | cost per person | 2026-12-12 to 2026-12-18 | tags: a, b`."""
+        option = _parse_option(event["body"])
+        if option is None:
+            return [self._say("I couldn't read that package. Format: OPTION P1 | name | cost per person | "
+                              "2026-12-12 to 2026-12-18 | tags: flight, mid-range")]
+        if self.locked:
+            return [self._say(f"The trip is locked: {self._label(self.locked)}.")]
+        oid, existing = option["id"], self.options.get(option["id"])
+        if existing and oid in self.verdicts and _terms(existing) != _terms(option):
+            return [self._say(f"{oid} was already checked this round, so it can't be changed. Use a new id.")]
+        self.options[oid] = option
+        self.catalog_version += 1
+        return self._check(event, oid)
+
     def _check(self, event: dict[str, Any], option: str) -> list[Outgoing]:
         ok, detail = event.get("wall", (True, ""))
         if not ok:
@@ -163,9 +244,10 @@ class Treaty:
             return [self._say(self._verdict_text(option))]
         sender, now = event["sender"], int(event["ts"])
         recent = [t for t in self.new_checks.get(sender, []) if now - t < WINDOW_MS]
-        if len(recent) >= NEW_CHECKS_PER_WINDOW:
+        allowed = self.guide_checks_per_window if self.guide and sender == self.guide else NEW_CHECKS_PER_WINDOW
+        if len(recent) >= allowed:
             again = _clock(min(recent) + WINDOW_MS)
-            return [self._say(f"{self._name(sender)}, you've used {NEW_CHECKS_PER_WINDOW} new checks in 10 minutes. "
+            return [self._say(f"{self._name(sender)}, you've used {allowed} new checks in 10 minutes. "
                               f"Next one at {again}. Options already checked this round are free.")]
         self.new_checks[sender] = [*recent, now]
         self.verdicts[option] = self._fits(option, self.applied)
@@ -221,7 +303,8 @@ class Treaty:
                     "person's limit).")
         ready = sum(1 for m in self.members if self.applied.get(m, Limits()).budget)
         if ready < len(self.members):
-            return f"❌ Not yet: {ready} of {len(self.members)} friends have set their limits in their private channel."
+            return (f"❌ Not yet: {ready} of {len(self.members)} friends have set their limits privately. Each friend "
+                    "can tell their own @treaty in their private channel.")
         return None
 
     def _fits(self, option: str, limits: dict[str, Limits]) -> bool:
@@ -268,7 +351,7 @@ class Treaty:
         return f"{option} ({self.options[option]['name']})"
 
     def _name(self, member: str) -> str:
-        return self.members.get(member, "someone")
+        return self.members.get(member, "the guide" if member == self.guide and self.guide else "someone")
 
     def _money(self, amount: int | None) -> str:
         symbol = {"INR": "₹", "USD": "$", "EUR": "€", "GBP": "£"}.get(self.currency, "")
@@ -292,6 +375,53 @@ def _parse_amount(text: str) -> int | None:
         return None
     amount = float(match.group(1)) * (1000 if match.group(2) else 1)
     return int(amount) if 1 <= amount <= 100_000_000 else None
+
+
+def _parse_brief(body: str) -> dict[str, Any] | None:
+    parts = [p.strip() for p in body.strip().lstrip("📝 ").split("|")]
+    if not parts or parts[0].lower() != "brief":
+        return None
+    brief: dict[str, Any] = {"prefs": {}}
+    for part in parts[1:]:
+        key, _, value = part.partition(":")
+        key, value = key.strip().lower(), value.strip()
+        if not value or value.lower() in ("none", "-", "n/a"):
+            if key == "avoid":
+                brief["avoid"] = frozenset()
+            continue
+        if key == "budget":
+            amounts = [a for a in (_parse_amount(m) for m in re.findall(r"[\d.,]+\s*k?", value.lower())) if a]
+            if amounts:
+                brief["budget"] = max(amounts)  # "around 10-12k": the most this friend will spend
+        elif key == "dates":
+            window = _parse_window(value)
+            if window:
+                brief["window"] = window
+        elif key == "avoid":
+            brief["avoid"] = frozenset(t.strip().lower() for t in value.split(",") if t.strip())
+        elif key in ("food", "hotel", "flights"):
+            brief["prefs"][key] = value.lower()
+    return brief
+
+
+def _parse_option(body: str) -> dict[str, Any] | None:
+    parts = [p.strip() for p in body.strip().split("|")]
+    head = parts[0].split()
+    if len(parts) < 4 or len(head) != 2 or head[0].lower() != "option" or not re.fullmatch(r"[A-Za-z]\d{1,2}", head[1]):
+        return None
+    cost = _parse_amount(parts[2])
+    window = _parse_window(parts[3])
+    if cost is None or window is None:
+        return None
+    tags = []
+    if len(parts) > 4 and parts[4].lower().startswith("tags"):
+        tags = [t.strip().lower() for t in parts[4].partition(":")[2].split(",") if t.strip()]
+    return {"id": head[1].upper(), "name": parts[1], "cost": cost, "start": window[0].isoformat(),
+            "end": window[1].isoformat(), "tags": tags}
+
+
+def _terms(option: dict[str, Any]) -> tuple:
+    return option["cost"], option["start"], option["end"], tuple(sorted(option.get("tags", [])))
 
 
 def _parse_window(text: str) -> tuple[date, date] | None:

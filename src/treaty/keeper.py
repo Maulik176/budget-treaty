@@ -21,7 +21,17 @@ from treaty.core import PRIVATE, TRIP, Treaty
 from treaty.switch_client import AGENT_FILE, Switch, SwitchError, hold_room, listen, register
 
 KEEPER_DESCRIPTION = "Budget Treaty keeper: holds each friend's private limits and checks trip options. Plain code, no AI."
-CATALOG_DOC, LEDGER_DOC = "trip-catalog", "treaty-ledger"
+CATALOG_DOC, LEDGER_DOC, PREFERENCES_DOC = "trip-catalog", "treaty-ledger", "group-preferences"
+DOCS = {
+    CATALOG_DOC: ("The trip packages and their prices",
+                  "The only source of trip packages and prices. Quote packages by id. Never invent a price."),
+    LEDGER_DOC: ("Who checked which package, the verdicts, the votes and the lock",
+                 "The trip's public history. Use it to summarize what the group has checked and decided. It never "
+                 "contains anyone's limits."),
+    PREFERENCES_DOC: ("What the group prefers, as counts with no names",
+                      "Food, hotel and flight preferences across the group, and how many friends are ready. Use it to "
+                      "shape packages. It never contains names, budgets or dates."),
+}
 
 
 # ── Pure helpers (tested offline) ──────────────────────────────────────────────────────────────────────────────
@@ -39,20 +49,24 @@ def merged_history(histories: list[tuple[list[dict[str, Any]], str, str | None]]
     return sorted(events, key=lambda e: e["ts"])
 
 
-def intruders(participants: list[dict[str, Any]], keeper_agent_id: str, friend: str) -> list[str]:
-    """In a private room only the keeper (by agent id) and that friend (by username) may be present."""
+def intruders(participants: list[dict[str, Any]], keeper_agent_id: str, friend: str,
+              companion: str | None = None) -> list[str]:
+    """In a private room only the keeper (by agent id), that friend (by username) and that friend's own companion
+    (by agent name) may be present."""
     found = []
     for p in participants:
-        if p.get("type") == "agent" and p.get("agent_id") != keeper_agent_id:
+        if p.get("type") == "agent" and p.get("agent_id") != keeper_agent_id and p.get("name") != companion:
             found.append(f"agent {p.get('name')}")
         elif p.get("type") == "user" and p.get("name") != friend:
             found.append(f"person {p.get('name')}")
     return found
 
 
-def catalog_text(catalog: dict[str, Any]) -> str:
-    lines = [f"Currency: {catalog.get('currency', '')}", "Options (the only valid prices and ids):"]
-    for o in catalog["options"]:
+def catalog_text(options: dict[str, dict[str, Any]], currency: str) -> str:
+    if not options:
+        return f"Currency: {currency}. No packages yet: the guide registers them with OPTION lines."
+    lines = [f"Currency: {currency}", "Packages (the only valid prices and ids):"]
+    for o in options.values():
         lines.append(f"- {o['id']}: {o['name']}. {o['cost']} per person. {o['start']} to {o['end']}. "
                      f"Tags: {', '.join(o.get('tags', [])) or 'none'}. {o.get('summary', '')}".rstrip())
     return "\n".join(lines)
@@ -72,64 +86,64 @@ class Keeper:
         self.trip_room = rooms[config["trip_room"]]
         self.private_rooms = {rooms[f["room"]]: f["discord"] for f in config["friends"]}  # room id -> friend
         self.room_of = {friend: room for room, friend in self.private_rooms.items()}
+        self.companions = {f["discord"]: f["companion"] for f in config["friends"] if f.get("companion")}
         self.treaty = Treaty(catalog, {f["discord"]: f["name"] for f in config["friends"]}, config["organizer"],
-                             min_group=config.get("min_group", 3))
-        started = config.get("trip_started_at")  # ISO time: ignore older trip-room messages (a fresh trip, same channel)
+                             min_group=config.get("min_group", 3), companions=dict(self.companions),
+                             guide=config.get("guide", ""))
+        started = config.get("trip_started_at")  # ISO time: ignore older messages (a fresh trip, same channels)
         self.trip_since = int(datetime.fromisoformat(started).timestamp() * 1000) if started else 0
         self.own_posts: set[str] = set()
         self.queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self.room_ready = asyncio.Event()
-        self.ledger_doc: str | None = None
-        self.ledger_len = 0
+        self.doc_ids: dict[str, str] = {}
+        self.doc_content: dict[str, str] = {}
 
     def rebuild(self) -> int:
         """Switch's room history is the only record: replay it through the same rules, posting nothing."""
-        trip = [e for e in self.switch.history(self.trip_room) if e.get("timestamp", 0) >= self.trip_since]
-        histories = [(trip, TRIP, None)]
-        histories += [(self.switch.history(room), PRIVATE, friend) for room, friend in self.private_rooms.items()]
+        def since(room: str) -> list[dict[str, Any]]:  # a fresh trip ignores older messages in every room
+            return [e for e in self.switch.history(room) if e.get("timestamp", 0) >= self.trip_since]
+
+        histories = [(since(self.trip_room), TRIP, None)]
+        histories += [(since(room), PRIVATE, friend) for room, friend in self.private_rooms.items()]
         events = merged_history(histories, self.switch.agent["name"])
         self.treaty.replay(events)
-        self.ledger_len = len(self.treaty.ledger)
         return len(events)
 
     def wall(self) -> tuple[bool, str]:
         for room, friend in self.private_rooms.items():
-            found = intruders(self.switch.participants(room), self.switch.agent["id"], friend)
+            found = intruders(self.switch.participants(room), self.switch.agent["id"], friend,
+                              self.companions.get(friend))
             if found:
                 return False, f"{', '.join(found)} in {self.treaty.members[friend]}'s private channel"
         return True, ""
 
+    def _documents(self) -> dict[str, str]:
+        t = self.treaty
+        return {CATALOG_DOC: catalog_text(t.options, t.currency),
+                LEDGER_DOC: "\n".join(t.ledger) or "Nothing checked yet.",
+                PREFERENCES_DOC: t.preferences_text()}
+
     def ensure_documents(self) -> None:
-        """`trip-catalog` and `treaty-ledger` live in the trip room and only the keeper writes them."""
+        """The keeper's three room documents in the trip room. Only their creator can change them."""
         ops = self.switch.agent["ops_connection_id"]
         room = self.switch.op("connect_to_room", ops, room_id=self.trip_room, include_general_instructions=False)
-        mine = {d["name"]: d["id"] for d in room.get("documents", [])
-                if d.get("created_by_agent_id") == self.switch.agent["id"]}
-        if CATALOG_DOC in mine:
-            self.switch.op("update_room_document", ops, document_id=mine[CATALOG_DOC], content=catalog_text(self.catalog))
-        else:
-            self.switch.op("create_room_document", ops, name=CATALOG_DOC, content=catalog_text(self.catalog),
-                           description="The trip options and their prices",
-                           instructions="The only source of trip options and prices. Quote options by id. Never invent "
-                                        "an option or a price.")
-        if LEDGER_DOC in mine:
-            self.ledger_doc = mine[LEDGER_DOC]
-        else:
-            self.ledger_doc = self.switch.op(
-                "create_room_document", ops, name=LEDGER_DOC, content=self._ledger_text(),
-                description="Who checked which option, the verdicts, and the lock",
-                instructions="The trip's public history. Use it to summarize what the group has checked and decided. "
-                             "It never contains anyone's limits.")["document_id"]
-        self._sync_ledger(force=True)
+        self.doc_ids = {d["name"]: d["id"] for d in room.get("documents", [])
+                        if d.get("created_by_agent_id") == self.switch.agent["id"] and d["name"] in DOCS}
+        for name, content in self._documents().items():
+            if name not in self.doc_ids:
+                description, instructions = DOCS[name]
+                self.doc_ids[name] = self.switch.op("create_room_document", ops, name=name, content=content,
+                                                    description=description, instructions=instructions)["document_id"]
+            else:
+                self.switch.op("update_room_document", ops, document_id=self.doc_ids[name], content=content)
+            self.doc_content[name] = content
 
-    def _ledger_text(self) -> str:
-        return "\n".join(self.treaty.ledger) or "Nothing checked yet."
-
-    def _sync_ledger(self, force: bool = False) -> None:
-        if self.ledger_doc and (force or len(self.treaty.ledger) != self.ledger_len):
-            self.switch.op("update_room_document", self.switch.agent["ops_connection_id"],
-                           document_id=self.ledger_doc, content=self._ledger_text())
-            self.ledger_len = len(self.treaty.ledger)
+    def sync_documents(self) -> None:
+        for name, content in self._documents().items():
+            if name in self.doc_ids and content != self.doc_content.get(name):
+                self.switch.op("update_room_document", self.switch.agent["ops_connection_id"],
+                               document_id=self.doc_ids[name], content=content)
+                self.doc_content[name] = content
 
     async def on_frame(self, frame: dict[str, Any]) -> None:
         await self.queue.put(frame)
@@ -153,7 +167,7 @@ class Keeper:
             event = to_event(payload, PRIVATE, self.private_rooms[room_id])
         else:
             return
-        if event["room"] == TRIP and event["body"].strip().lower().startswith("check"):
+        if event["room"] == TRIP and event["body"].strip().lower().startswith(("check", "option")):
             event["wall"] = await asyncio.to_thread(self.wall)
         for room, owner, text in await asyncio.to_thread(self.treaty.handle, event):
             target = self.trip_room if room == TRIP else self.room_of[owner]
@@ -161,7 +175,7 @@ class Keeper:
             if posted:
                 self.own_posts.add(posted)
         await asyncio.wait_for(self.room_ready.wait(), timeout=15)
-        await asyncio.to_thread(self._sync_ledger)
+        await asyncio.to_thread(self.sync_documents)
 
     async def run(self) -> None:
         listener = asyncio.create_task(listen(self.switch, self.on_frame))  # open first, so nothing slips past the rebuild
