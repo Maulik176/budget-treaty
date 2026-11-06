@@ -1,7 +1,7 @@
 [project]
 name = "budget-treaty"
 version = "0.1.0"
-description = "Friends plan a trip together; a plain-code keeper checks every option against everyone's private budget, and no AI ever sees a number. Built on Switch."
+description = "Friends plan a trip together; a plain-code keeper checks every option against everyone's private budget, and no shared AI ever sees a number. Built on Switch."
 requires-python = ">=3.11"
 dependencies = ["websockets>=14"]
 

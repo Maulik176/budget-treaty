@@ -37,13 +37,37 @@ Nobody learns a command. Nobody finds out who couldn't afford what.
 | | What it is | The Switch piece it rests on |
 |---|---|---|
 | **Your companion** | A Claude Code agent in your private channel only. It knows your limits and nobody else's. | Room membership: an agent only receives the rooms it's in |
-| **The guide** | A Claude Code agent in `#trip` only, with web search. It never sees a limit. | Room membership, room documents (`group-preferences`, `trip-catalog`, `treaty-ledger`) |
+| **The guide** | A Claude Code agent in `#trip` only, with web search. It never sees a limit. | Room membership, room documents (it reads the keeper's `treaty-board` and keeps a `trip-checklist`) |
 | **The keeper** | Plain code, no AI. The only participant in every room: it turns private briefs into one group answer. | The agent protocol (one WebSocket for every room), room history (it rebuilds from Switch after a restart and never writes a number down) |
 | **`@treaty` everywhere** | Friends type one name; in your room it's your companion, in `#trip` it's the guide | Per-room aliases |
 | **The tripwire** | Before every answer the keeper asks Switch who is in each private room. If anyone other than that friend, their companion and the keeper is there, it stops and names the intruder. | Switch's participant list |
 
 Take Switch away and you're left with one bot that has to collect everyone's budget and hand it to one AI. The walls
 between friends only exist because each agent is a separate participant in separate rooms.
+
+```mermaid
+flowchart LR
+  subgraph PA["#treaty-aarav (private)"]
+    A([Aarav]) <--> CA[Aarav's companion]
+  end
+  subgraph PD["#treaty-diya (private)"]
+    D([Diya]) <--> CD[Diya's companion]
+  end
+  subgraph PM["#treaty-maulik (private)"]
+    M([Maulik]) <--> CM[Maulik's companion]
+  end
+  K{{"treaty-keeper<br/>plain code, in every room"}}
+  subgraph T["#trip (everyone)"]
+    F(["Aarav, Diya, Maulik"]) <--> G["guide<br/>web search, no limits"]
+  end
+  CA -- "BRIEF (budget, dates)" --> K
+  CD -- BRIEF --> K
+  CM -- BRIEF --> K
+  G -- "OPTION P1 … (a package)" --> K
+  K -- "✅ fits everyone / ❌ doesn't" --> T
+```
+
+The only arrows that carry a number end at the keeper. The keeper only ever answers in `#trip` with one group verdict.
 
 ## What we claim, and what we don't
 
@@ -85,6 +109,18 @@ the whole group; no answers with fewer than 3 friends or before everyone is read
 round once a verdict exists, and the lock re-checks everyone's latest limits; a check rate limit; a public ledger of
 who checked what. Details in [docs/design.md](docs/design.md).
 
+## What it still gets wrong
+
+- **Whoever runs the Switch server is trusted.** Messages sit in its database and in Discord, and Discord server
+  owners can read private channels.
+- **Switch's Discord clutter can't be switched off:** join greetings, `!` command threads, document notices and the
+  guide's "Worked for…" cards. We work around it with Discord's Hide After Inactivity.
+- **The guide's prices are web estimates, not bookings.** It says so, and it can't book anything.
+- **If the keeper restarts, it replays a check that was refused during a wall breach as a normal check.** The answer
+  is still one group verdict, but the history shows a check nobody got.
+- **Tested with one person playing three friends.** The 3-person run and the demo use Discord test accounts I
+  control. No real group has planned a trip with it yet.
+
 ## Run the tests
 
 ```bash
@@ -92,20 +128,109 @@ uv sync
 uv run pytest -q
 ```
 
-## Run it
+## Run it yourself
 
-Needs Switch Console 0.40.1 with its local server running and a Discord server connected. Full step-by-step setup is
-coming; the short version:
+About 30 minutes the first time. Tested on macOS with switch-core 0.31.0, Switch Console 0.40.1 and Discord.
+
+**You need:** Docker, [Switch Console 0.40.1](https://github.com/sandbox-quantum/switch/releases/tag/switch-console-v0.40.1),
+[Claude Code](https://docs.claude.com/en/docs/claude-code/overview) installed and logged in (Console runs the companions
+and the guide with it), [uv](https://docs.astral.sh/uv/) (it fetches Python 3.12), and a Discord server you own. For a
+real trip, one Discord account per friend. To try it alone, see step 6.
+
+### 1. Switch and Discord
+
+1. Start Docker, then open Switch Console. **Add a server → Run a server on this computer.**
+2. Connect your Discord bot and link your Discord account
+   ([Switch docs: Connect Discord](https://docs.switchagents.ai/switch-rooms/deploy/messaging-apps/discord)).
+
+### 2. Channels
+
+- `#trip`: everyone in the group.
+- One **private** channel per friend, e.g. `#treaty-aarav`. Only that friend and the Switch bot's role can view it
+  (channel settings → Permissions → Private channel). Note: a Discord server owner can read every private channel.
+- Post `hello` in each one. Switch turns each channel into a room named `<server>: <channel>`.
+
+### 3. The AI agents, in Switch Console
+
+Create each agent with **Claude Code** as the provider, an empty working folder (e.g. `~/budget-treaty-agents/`, not
+this repo), and **anyone in the room** allowed to address it. Paste the instructions file into the agent's
+instructions.
+
+| Agent | Instructions | Allowed tools | Invite it into |
+|---|---|---|---|
+| `treaty-planner` (the guide) | [`agents/guide.md`](agents/guide.md) | `TodoWrite, WebSearch, WebFetch` | `#trip` only |
+| `treaty-<name>`, one per friend (their companion) | [`agents/companion.md`](agents/companion.md) | `TodoWrite` | that friend's private channel only |
+
+In **Disallowed tools**, list everything else for every agent: `Bash, Read, Write, Edit, MultiEdit, NotebookEdit, Glob,
+Grep, Task, ToolSearch`, plus `WebFetch, WebSearch` for companions and any MCP servers you have installed. Console
+agents run Claude Code on your computer and inherit your MCP servers. A companion should be able to chat and nothing
+else.
+
+Set `#trip`'s room instructions to [`agents/trip-room.md`](agents/trip-room.md). Invite each agent from its channel
+with `!invite-agent @<agent name>`.
+
+### 4. The keeper (this repo)
+
+```bash
+git clone https://github.com/Maulik176/budget-treaty
+cd budget-treaty
+uv sync
+```
+
+The keeper registers like any custom agent, so it needs an agent registration key. Save the key in
+`~/.config/budget-treaty/registration_key` (one line, `chmod 600`). On a Switch server with a Gateway, create one
+there. Console's local server has no Gateway UI, so use the server's bootstrap key, `AGENT_REGISTRATION_TOKEN`, from the
+local server's environment file in Console's data folder (`~/Library/Application Support/switchdash/` on macOS). Agents
+registered with it belong to a separate bootstrap account, which is fine for the keeper. Don't share it.
 
 ```bash
 uv run treaty-keeper register
-uv run treaty-keeper whois --room "<Switch room name>"
-uv run treaty-keeper run --config trips/example/trip.json
 ```
 
-`register` reads a registration key from `~/.config/budget-treaty/registration_key` and stores the keeper's own key in
-`~/.config/budget-treaty/agent.json` (mode 600). Copy `trips/example/` and fill in your rooms, your friends' Discord
-usernames and their companions' names. Agent instructions are in `agents/`.
+The keeper's own key is saved in `~/.config/budget-treaty/agent.json` (mode 600) and never printed. Then, in
+**every** channel (`#trip` and each private one), run `!invite-agent @treaty-keeper`.
+
+### 5. One name for friends to type: `@treaty`
+
+- In each private channel: `!set-alias @treaty-aarav @treaty` (that friend's companion).
+- In `#trip`: `!set-alias @treaty-planner @treaty` and `!set-alias @treaty-keeper @keeper`.
+
+### 6. Describe the trip and start the keeper
+
+```bash
+cp -r trips/example trips/bali
+uv run treaty-keeper whois --room "<server>: treaty-aarav"
+```
+
+`whois` prints each participant's Discord username exactly as Switch sees it. In `trips/bali/trip.json`, fill in
+the `#trip` room name, the organizer, and for each friend their name, Discord username, private room and companion.
+Leave `catalog.json` empty: the guide registers real packages itself. Set `trip_started_at` to
+now (e.g. `"2026-12-01T18:00:00+05:30"`) so older messages in reused channels are ignored. To try it alone, list one
+friend and set `"min_group": 1`.
+
+```bash
+uv run treaty-keeper run --config trips/bali/trip.json
+```
+
+It prints `Rebuilt from N messages in Switch history. Round 1. Keeper is live.` and keeps running. If you stop it,
+start it again: it rebuilds everything from Switch's history.
+
+### 7. Try it
+
+1. In your private channel: *"@treaty hey! I can do around 60–75k, I'm not veg, cheapest flights please."* Say yes
+   when it asks to pass this to the keeper. The keeper answers with 🔒.
+2. When everyone has done that, `#trip` shows *"✅ All 3 friends have set their limits privately."*
+3. In `#trip`: *"@treaty we're 3 friends going to Bali in December, first time. What should we do?"* The guide
+   researches prices, registers 2 or 3 packages, and the keeper answers each with ✅ or ❌.
+4. Vote in plain words: *"count me in for P2"*, *"not for me"*. The organizer says *"let's lock P2"*.
+5. *"@treaty what can we do in Bali on P2's budget, and what documents do we need?"*
+6. **The wall:** in a private channel, `!invite-agent @treaty-planner`. The next check in `#trip` (`check P2`) answers
+   *"⚠️ Wall breach…"* and names the intruder. Fix it with `!remove-agent @treaty-planner`, and checks resume.
+
+**If something's off:** the keeper exits with *"the keeper isn't in these rooms yet"* until it's invited everywhere.
+No reply in `#trip` usually means the keeper isn't running. Switch posts a greeting when an agent joins and answers `!`
+commands in threads. Console agents also show a "Worked for… · N tool calls" card in a thread. None of these can be
+turned off today, so for a clean channel set Discord's **Hide After Inactivity** to 1 hour.
 
 <details>
 <summary>Plain commands (optional; nobody needs them)</summary>
